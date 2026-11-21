@@ -315,7 +315,18 @@ IOReturn VoodooGPIOAMD::enableInterrupt(int pin) {
     this->amd_gpio_irq_enable(pin);
     this->amd_gpio_irq_set_type(pin, this->interruptTypes[pin]);
     this->amd_gpio_irq_unmask(pin);
-    return this->getProvider()->enableInterrupt(0);
+    IOReturn ret = this->getProvider()->enableInterrupt(0);
+
+    /*
+     * If an interrupt was delivered while the vector was disabled, the handler never ran and
+     * never signalled EOI, and the GPIO controller will not raise another interrupt until it
+     * gets one (WAKE_INT_MASTER_REG bit 29 reads 0 while an EOI is outstanding, 1 when idle).
+     * Done after the vector is enabled again so a re-raised interrupt is delivered normally.
+     */
+    if (!(readl(this->base + WAKE_INT_MASTER_REG) & EOI_MASK))
+        this->amd_gpio_irq_eoi();
+
+    return ret;
 }
 
 /**
