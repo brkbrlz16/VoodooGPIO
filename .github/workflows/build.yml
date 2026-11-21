@@ -1,5 +1,5 @@
 
-name: Build VoodooGPIO
+name: Build VoodooGPIO for macOS Tahoe
 
 on:
   workflow_dispatch:
@@ -14,11 +14,17 @@ jobs:
       - name: Checkout VoodooGPIO
         uses: actions/checkout@v4
 
-      - name: Checkout MacKernelSDK
-        uses: actions/checkout@v4
-        with:
-          repository: acidanthera/MacKernelSDK
-          path: MacKernelSDK
+      - name: Install MacKernelSDK
+        run: |
+          git clone --depth 1 \
+            https://github.com/acidanthera/MacKernelSDK.git \
+            "$GITHUB_WORKSPACE/../../MacKernelSDK"
+
+      - name: Verify dependencies
+        run: |
+          test -f "$GITHUB_WORKSPACE/../../MacKernelSDK/Headers/IOKit/IOLib.h"
+          test -f "$GITHUB_WORKSPACE/../../MacKernelSDK/Library/x86_64/libkmod.a"
+          echo "MacKernelSDK dependencies verified."
 
       - name: Build VoodooGPIO
         run: |
@@ -30,9 +36,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Upload compiled kext
+      - name: Upload VoodooGPIO.kext
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: VoodooGPIO-kext
+          name: VoodooGPIO-Tahoe
           path: build/Build/Products/Release/VoodooGPIO.kext
