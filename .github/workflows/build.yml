@@ -35,10 +35,15 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             build
+      - name: Package VoodooGPIO.kext
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build/Build/Products/Release/VoodooGPIO.kext" \
+            "$RUNNER_TEMP/VoodooGPIO.kext.zip"
 
       - name: Upload VoodooGPIO.kext
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: VoodooGPIO-Tahoe
-          path: build/Build/Products/Release/VoodooGPIO.kext
+          path: ${{ runner.temp }}/VoodooGPIO.kext.zip
+          
