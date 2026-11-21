@@ -1,0 +1,34 @@
+
+name: Build VoodooGPIO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build VoodooGPIO
+        run: |
+          xcodebuild \
+            -project VoodooGPIO.xcodeproj \
+            -scheme VoodooGPIO \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Upload compiled kext
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoodooGPIO-kext
+          path: build/Build/Products/Release/VoodooGPIO.kext
