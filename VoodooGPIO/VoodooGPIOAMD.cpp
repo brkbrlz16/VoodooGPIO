@@ -14,19 +14,20 @@
 #define GPIO_LINE_DIRECTION_OUT	0
 
 /*
- * Diagnostics for the missed-EOI investigation (see enableInterrupt() and InterruptOccurred()).
+ * Missed-EOI workaround (see enableInterrupt()).
+ *
+ * The GPIO controller waits for an end-of-interrupt (WAKE_INT_MASTER_REG bit 29) after every
+ * interrupt it delivers. Clients (VoodooI2CHID) mask the controller's interrupt vector around
+ * each report read, and a delivery that happens while the vector is masked never reaches
+ * do_amd_gpio_irq_handler(), so nobody sends its EOI and the controller never raises another
+ * interrupt (the touchpad dies until reboot).
+ *
  *  gInHandler       > 0 while do_amd_gpio_irq_handler() is running.
  *  gHandlerEntries  number of times the handler was entered.
- *  gEnableCalls     number of enableInterrupt() calls (one per touchpad report).
- *  gEoiInFlight     EOI outstanding at the end of enableInterrupt(), and a handler ran (or was
- *                   already running) within ~1 ms: a normal delivery, the handler sends the EOI.
- *  gEoiRecoveries   EOI outstanding and NO handler showed up within ~1 ms: the delivery never
- *                   reached the handler (what used to kill the touchpad). The EOI is sent here.
+ *  gEoiRecoveries   number of swallowed deliveries repaired (exposed as the EoiRecoveries property).
  */
 static volatile SInt32 gInHandler = 0;
 static volatile SInt32 gHandlerEntries = 0;
-static volatile SInt32 gEnableCalls = 0;
-static UInt32 gEoiInFlight = 0;
 static UInt32 gEoiRecoveries = 0;
 
 OSDefineMetaClassAndStructors(VoodooGPIOAMD, VoodooGPIO);
@@ -343,14 +344,12 @@ IOReturn VoodooGPIOAMD::enableInterrupt(int pin) {
      * gets one (WAKE_INT_MASTER_REG bit 29 reads 0 while an EOI is outstanding, 1 when idle).
      * Done after the vector is enabled again so a re-raised interrupt is delivered normally.
      */
-    OSIncrementAtomic(&gEnableCalls);
-
     if (!(readl(this->base + WAKE_INT_MASTER_REG) & EOI_MASK)) {
         /*
          * An EOI is outstanding. While the touchpad is being swiped a new delivery is usually
          * already in flight here (its handler is running or about to run and will send the EOI
-         * itself). A swallowed delivery has no handler coming. Give a handler up to ~1 ms to
-         * show up before deciding.
+         * itself, measured: about 40% of calls). A swallowed delivery has no handler coming.
+         * Give a handler up to ~1 ms to show up before deciding.
          */
         SInt32 entries0 = gHandlerEntries;
         bool inFlight = (gInHandler != 0);
@@ -361,15 +360,11 @@ IOReturn VoodooGPIOAMD::enableInterrupt(int pin) {
                 inFlight = true;
         }
 
-        if (inFlight) {
-            gEoiInFlight++;
-        } else {
+        if (!inFlight) {
             this->amd_gpio_irq_eoi();
             gEoiRecoveries++;
+            this->setProperty("EoiRecoveries", (unsigned long long)gEoiRecoveries, 32);
         }
-        this->setProperty("EoiInFlight", (unsigned long long)gEoiInFlight, 32);
-        this->setProperty("EoiRecoveries", (unsigned long long)gEoiRecoveries, 32);
-        this->setProperty("EnableCalls", (unsigned long long)gEnableCalls, 32);
     }
 
     return ret;
@@ -491,10 +486,8 @@ bool VoodooGPIOAMD::start(IOService *provider) {
 
     this->amd_gpio_irq_init();
 
-    this->setProperty("PatchVersion", "eoi-check-3 (classifying)");
+    this->setProperty("PatchVersion", "eoi-fix-1");
     this->setProperty("EoiRecoveries", (unsigned long long)0, 32);
-    this->setProperty("EoiInFlight", (unsigned long long)0, 32);
-    this->setProperty("EnableCalls", (unsigned long long)0, 32);
 
     this->registerService();
 
