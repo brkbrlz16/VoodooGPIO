@@ -15,15 +15,19 @@
 
 /*
  * Diagnostics for the missed-EOI investigation (see enableInterrupt() and InterruptOccurred()).
- *  gInHandler      > 0 while do_amd_gpio_irq_handler() is running.
- *  gEoiRecoveries  EOI found outstanding while no handler was running: a delivery that never
- *                  reached the handler (the failure that used to kill the touchpad).
- *  gEoiEarly       EOI found outstanding while a handler was still running (benign, the handler
- *                  would have sent it a moment later).
+ *  gInHandler       > 0 while do_amd_gpio_irq_handler() is running.
+ *  gHandlerEntries  number of times the handler was entered.
+ *  gEnableCalls     number of enableInterrupt() calls (one per touchpad report).
+ *  gEoiInFlight     EOI outstanding at the end of enableInterrupt(), and a handler ran (or was
+ *                   already running) within ~1 ms: a normal delivery, the handler sends the EOI.
+ *  gEoiRecoveries   EOI outstanding and NO handler showed up within ~1 ms: the delivery never
+ *                   reached the handler (what used to kill the touchpad). The EOI is sent here.
  */
 static volatile SInt32 gInHandler = 0;
+static volatile SInt32 gHandlerEntries = 0;
+static volatile SInt32 gEnableCalls = 0;
+static UInt32 gEoiInFlight = 0;
 static UInt32 gEoiRecoveries = 0;
-static UInt32 gEoiEarly = 0;
 
 OSDefineMetaClassAndStructors(VoodooGPIOAMD, VoodooGPIO);
 
@@ -239,6 +243,7 @@ int VoodooGPIOAMD::amd_gpio_resume() {
 }
 
 void VoodooGPIOAMD::InterruptOccurred(void *refCon, IOService *nub, int source) {
+    OSIncrementAtomic(&gHandlerEntries);
     OSIncrementAtomic(&gInHandler);
     this->do_amd_gpio_irq_handler(source);
     OSDecrementAtomic(&gInHandler);
@@ -338,15 +343,33 @@ IOReturn VoodooGPIOAMD::enableInterrupt(int pin) {
      * gets one (WAKE_INT_MASTER_REG bit 29 reads 0 while an EOI is outstanding, 1 when idle).
      * Done after the vector is enabled again so a re-raised interrupt is delivered normally.
      */
+    OSIncrementAtomic(&gEnableCalls);
+
     if (!(readl(this->base + WAKE_INT_MASTER_REG) & EOI_MASK)) {
-        this->amd_gpio_irq_eoi();
-        if (gInHandler == 0) {
-            gEoiRecoveries++;
-            this->setProperty("EoiRecoveries", (unsigned long long)gEoiRecoveries, 32);
-        } else {
-            gEoiEarly++;
-            this->setProperty("EoiEarly", (unsigned long long)gEoiEarly, 32);
+        /*
+         * An EOI is outstanding. While the touchpad is being swiped a new delivery is usually
+         * already in flight here (its handler is running or about to run and will send the EOI
+         * itself). A swallowed delivery has no handler coming. Give a handler up to ~1 ms to
+         * show up before deciding.
+         */
+        SInt32 entries0 = gHandlerEntries;
+        bool inFlight = (gInHandler != 0);
+        for (int i = 0; !inFlight && i < 100; i++) {
+            IODelay(10);
+            if (gHandlerEntries != entries0 || gInHandler != 0 ||
+                (readl(this->base + WAKE_INT_MASTER_REG) & EOI_MASK))
+                inFlight = true;
         }
+
+        if (inFlight) {
+            gEoiInFlight++;
+        } else {
+            this->amd_gpio_irq_eoi();
+            gEoiRecoveries++;
+        }
+        this->setProperty("EoiInFlight", (unsigned long long)gEoiInFlight, 32);
+        this->setProperty("EoiRecoveries", (unsigned long long)gEoiRecoveries, 32);
+        this->setProperty("EnableCalls", (unsigned long long)gEnableCalls, 32);
     }
 
     return ret;
@@ -468,9 +491,10 @@ bool VoodooGPIOAMD::start(IOService *provider) {
 
     this->amd_gpio_irq_init();
 
-    this->setProperty("PatchVersion", "eoi-check-2 (instrumented)");
+    this->setProperty("PatchVersion", "eoi-check-3 (classifying)");
     this->setProperty("EoiRecoveries", (unsigned long long)0, 32);
-    this->setProperty("EoiEarly", (unsigned long long)0, 32);
+    this->setProperty("EoiInFlight", (unsigned long long)0, 32);
+    this->setProperty("EnableCalls", (unsigned long long)0, 32);
 
     this->registerService();
 
